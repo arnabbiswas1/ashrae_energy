@@ -57,31 +57,6 @@ def read_data(data_dir, train=True, test=True, weather_train=False, weather_test
     return train_df, test_df, weather_train_df, weather_test_df, building_df
 
 
-def read_data(data_dir, train=True, test=True, weather_train=False, weather_test=False, building=False):
-    print('Reading Data...')
-    train_df = None
-    test_df = None
-    weather_train_df = None
-    weather_test_df = None
-    building_df = None
-    if train:
-        train_df = feather.read_dataframe(f'{data_dir}/train_merged.feather')
-        print(f'Shape of train_df : {train_df.shape}')
-    if test:
-        test_df = feather.read_dataframe(f'{data_dir}/test_merged.feather')
-        print(f'Shape of test_df : {test_df.shape}')
-    if weather_train:
-        weather_train_df = feather.read_dataframe(f'{data_dir}/weather_train.feather')
-        print(f'Shape of weather_train_df : {weather_train_df.shape}')
-    if weather_test:
-        weather_test_df = feather.read_dataframe(f'{data_dir}/weather_test.feather')
-        print(f'Shape of weather_test_df : {weather_test_df.shape}')
-    if building:
-        building_df = feather.read_dataframe(f'{data_dir}/building.feather')
-        print(f'Shape of building_df : {building_df.shape}')
-    return train_df, test_df, weather_train_df, weather_test_df, building_df
-
-
 ############################################## Utility ##############################################
 
 def set_seed(seed=0):
@@ -166,7 +141,6 @@ def plot_hist_train_test_overlapping(df_train, df_test, feature_name, kind='hist
     df_test[feature_name].plot(kind='hist',label='test', bins=50, alpha=0.4)
     plt.legend()
     plt.show()
-    
     
 
 def plot_barh_train_test_side_by_side(df_train, df_test, feature_name, normalize=True, sort_index=False):
@@ -290,55 +264,6 @@ def plot_boxh_groupby(df, feature_name, by):
                               figsize=(10, 6))
     plt.title(f'Distribution of {feature_name} by {by}')
     plt.show()
-
-
-def plot_meter_reading_for_site(df, site_id, meter_name):
-    """
-    Plot meter_reading for an entire site for all buildings
-    """
-    df = df.set_index('timestamp')
-    building_id_list = df.columns
-    for building_id in building_id_list:
-        fig = go.Figure()
-        df_subset = df.loc[:, building_id]
-        fig.add_trace(go.Scatter(
-             x=df_subset.index,
-             y=df_subset.values,
-             name=f"{meter_name}",
-             hoverinfo=f'x+y+name',
-             opacity=0.7))
-
-        fig.update_layout(width=1000,
-                        height=500,
-                        title_text=f"Meter Reading for Site [{site_id}] Building [{building_id}]",
-                        xaxis_title="timestamp",
-                        yaxis_title="meter_reading",)
-        fig.show()
-        
-
-def plot_meter_reading_for_building(df, site_id, building_id, meter_name):
-    """
-    Plot meter_reading for an entire site for all buildings
-    """
-    df = df.set_index('timestamp')
-    building_id_list = df.columns
-    for building_id in building_id_list:
-        fig = go.Figure()
-        df_subset = df.loc[:, building_id]
-        fig.add_trace(go.Scatter(
-             x=df_subset.index,
-             y=df_subset.values,
-             name=f"{meter_name}",
-             hoverinfo=f'x+y+name',
-             opacity=0.7))
-
-        fig.update_layout(width=1000,
-                        height=500,
-                        title_text=f"Meter Reading for Site [{site_id}] Building [{building_id}]",
-                        xaxis_title="timestamp",
-                        yaxis_title="meter_reading",)
-        fig.show()      
-
 
     
 ########################################################### EDA ###########################################################
@@ -602,4 +527,7 @@ def make_prediction(df_train_X, df_train_Y, df_test_X, params, n_splits=5):
     result_dict['std_cv_scores'] = std_cv_scores
     
     return result_dict
+
+
+
 
