@@ -1,17 +1,30 @@
+import gc
+import random
+import sys 
+import feather
+
 import numpy as np 
 import pandas as pd
-import feather
-import plotly
-import plotly.graph_objects as go
-import gc
-
-pd.options.display.max_rows = 200
 
 from IPython.display import display
 
+import plotly
+import plotly.graph_objects as go
+
+from sklearn.preprocessing import LabelEncoder
+from sklearn import metrics
+from sklearn.model_selection import KFold
+
+import lightgbm as lgb
+
+pd.options.display.max_rows = 200
 
 meter_dict = {0: 'electricity', 1: 'chilledwater', 2: 'steam', 3: 'hotwater'}
+
+# Directory consisting of (almost) original data in feather format
 CREATED_DATA_DIR = '/home/jupyter/kaggle/energy/data/read_only_feather/v2'
+# Directory consisting of differnt newly created data
+CREATED_FEATURE_DIR = '/home/jupyter/kaggle/energy/data/created_data'
 
 
 def read_files(dir_path, train_file_name='train.csv', 
@@ -62,6 +75,13 @@ def read_data(data_dir, train=True, test=True, weather_train=False, weather_test
 def set_seed(seed=0):
     random.seed(seed)
     np.random.seed(seed)
+    
+
+def trigger_gc():
+    """
+    Trigger GC
+    """
+    gc.collect()
 
 ############################################## Visualization ##############################################
 
@@ -114,18 +134,21 @@ def plot_meter_reading_for_building(df, site_id, building_id, meter_name):
         fig.show()
         
 
-def display_all_site_meter_reading(df, site_id, meter):
-    train_df_meter_subset = df[(df.site_id == site_id) & (train_df.meter == 0)]
-    train_df_meter_subset = train_df_meter_subset.pivot(index='timestamp', columns='building_id', values='meter_reading')
+def display_all_site_meter_reading(df, site_id=0, meter=0):
+    """
+    Plot meter reading for the entire site for a particular type of meter 
+    """
+    df_meter_subset = df[(df.site_id == site_id) & (df.meter == meter)]
+    df_meter_subset = df_meter_subset.pivot(index='timestamp', columns='building_id', values='meter_reading')
 
-    column_names = train_df_meter_subset.reset_index().columns.values
-    train_df_meter_subset.reset_index(inplace=True)
-    train_df_meter_subset.columns = column_names
+    column_names = df_meter_subset.reset_index().columns.values
+    df_meter_subset.reset_index(inplace=True)
+    df_meter_subset.columns = column_names
     
     print(f'Missing Values for {site_id}')
-    display(train_df_meter_subset.isna().sum())
+    display(df_meter_subset.isna().sum())
     
-    plot_meter_reading_for_site(train_df_meter_subset, 0, meter_dict[meter])
+    plot_meter_reading_for_site(df_meter_subset, site_id, meter_dict[meter])
 
 
 def plot_hist_train_test_overlapping(df_train, df_test, feature_name, kind='hist'):
@@ -322,6 +345,17 @@ def check_value_counts_across_train_test(train_df, test_df, feature_name, normal
     return count_df
 
 
+def get_non_zero_meter_reading_timestamp(df, building_id, start_time, stop_time, meter=0):
+    """
+    For a particular building, when was the first non-zero meter reading appeared.
+    given the start and stop time and the type of the meter
+    """
+    return df[(df.building_id == building_id) 
+                & (df.timestamp >= np.datetime64(start_time)) 
+                & (df.timestamp < np.datetime64(stop_time)) 
+                & (df.meter_reading > 0) & (df.meter == meter)]['timestamp'].iloc[0]
+
+
 ###################################################### Pre-Processing ######################################################
 
 
@@ -352,45 +386,94 @@ def fill_with_mix(df):
     return df.fillna(df.iloc[1])
 
 
-############################################ Feature Engineering ############################################
+def clean_data_for_site_0(df):
+    # Get the building_ids for site 0
+    df_site_0 = df[df.site_id == 0]
+    
+    # On May 20th at what time, the meter reading started?
+    
+    # I already know that building 40, 45, 53 does not start at 20th May
+    # Building 29 - Aug 10th 00 HRS
+    # Building 40 - June 3rd 11 AM
+    # Building 45 - June 30th 13 HRS onwards
+    # Building 53 - Don't do anything
+    
+    building_ids = list(df_site_0.building_id.unique())
+    building_ids.remove(29)
+    building_ids.remove(40)
+    building_ids.remove(45)
+    building_ids.remove(53)
 
-def create_date_features(df, feature_name):
-    '''
-    Create new features related to dates
+    # Build a dictionary with building id vs time at which meter reading started
+    non_zero_meter_reading_start_dict = {}
+    non_zero_meter_reading_start_dict[40] = pd.Timestamp('2016-06-03 11:00:00')
+    non_zero_meter_reading_start_dict[45] = pd.Timestamp('2016-06-30 13:00:00')
+    non_zero_meter_reading_start_dict[29] = pd.Timestamp('2016-08-10 00:00:00')
+
+    # Let's assume for other buildings it starts at May 20th
+    # Get the timestamp from which meter reading has non-zero values
+    for id_ in building_ids:
+        stamp = get_non_zero_meter_reading_timestamp(df_site_0, 
+                                             building_id=id_, 
+                                             start_time='2016-05-20 00:00:00',
+                                             stop_time='2016-05-21 00:00:00')
+        non_zero_meter_reading_start_dict[id_] =  stamp
     
-    df : The complete dataframe
-    feature_name : Name of the feature of date type which needs to be decomposed.
-    '''
-    df.loc[:, 'year'] = df.loc[:, feature_name].dt.year.astype('uint32')
-    df.loc[:, 'month'] = df.loc[:, feature_name].dt.month.astype('uint32')
-    df.loc[:, 'quarter'] = df.loc[:, feature_name].dt.quarter.astype('uint32')
-    df.loc[:, 'weekofyear'] = df.loc[:, feature_name].dt.weekofyear.astype('uint32')
-    
-    df.loc[:, 'day'] = df.loc[:, feature_name].dt.day.astype('uint32')
-    df.loc[:, 'dayofweek'] = df.loc[:, feature_name].dt.dayofweek.astype('uint32')
-    df.loc[:, 'dayofyear'] = df.loc[:, feature_name].dt.dayofyear.astype('uint32')
-    df.loc[:, 'is_month_start'] = df.loc[:, feature_name].dt.is_month_start
-    df.loc[:, 'is_month_end'] = df.loc[:, feature_name].dt.is_month_end
-    df.loc[:, 'is_quarter_start']= df.loc[:, feature_name].dt.is_quarter_start
-    df.loc[:, 'is_quarter_end'] = df.loc[:, feature_name].dt.is_quarter_end
-    df.loc[:, 'is_year_start'] = df.loc[:, feature_name].dt.is_year_start
-    df.loc[:, 'is_year_end'] = df.loc[:, feature_name].dt.is_year_end
-    
-    df.loc[:, 'hour'] = df.loc[:, feature_name].dt.hour.astype('uint32')
-    df.loc[:, 'minute'] = df.loc[:, feature_name].dt.minute.astype('uint32')
-    df.loc[:, 'second'] = df.loc[:, feature_name].dt.second.astype('uint32')
-    # This is of type object
-    df.loc[:, 'month_year'] = df.loc[:, feature_name].dt.to_period('M')
-    
+    # Clean the data now
+    for building_id, time in non_zero_meter_reading_start_dict.items():
+        print(f'Cleaning for building id {building_id}')
+        df.drop(df[(df.site_id == 0) 
+                               & (df.building_id == building_id) 
+                               & (df.timestamp < time)].index, inplace=True)
+        print(f'Distribution of time for building id {building_id} afer cleaning')
+        display(df[(df.site_id == 0) 
+                               & (df.building_id == building_id)].timestamp.describe())
+    print('Cleaning of data completed...')
     return df
 
 
+############################################ Feature Engineering ############################################
+
+def create_date_features(source_df, target_df, feature_name):
+    '''
+    Create new features related to dates
+    
+    source_df : DataFrame consisting of the timestamp related feature
+    target_df : DataFrame where new features will be added
+    feature_name : Name of the feature of date type which needs to be decomposed.
+    '''
+    target_df.loc[:, 'year'] = source_df.loc[:, feature_name].dt.year.astype('uint32')
+    target_df.loc[:, 'month'] = source_df.loc[:, feature_name].dt.month.astype('uint32')
+    target_df.loc[:, 'quarter'] = source_df.loc[:, feature_name].dt.quarter.astype('uint32')
+    target_df.loc[:, 'weekofyear'] = source_df.loc[:, feature_name].dt.weekofyear.astype('uint32')
+    
+    target_df.loc[:, 'day'] = source_df.loc[:, feature_name].dt.day.astype('uint32')
+    target_df.loc[:, 'dayofweek'] = source_df.loc[:, feature_name].dt.dayofweek.astype('uint32')
+    target_df.loc[:, 'dayofyear'] = source_df.loc[:, feature_name].dt.dayofyear.astype('uint32')
+    target_df.loc[:, 'is_month_start'] = source_df.loc[:, feature_name].dt.is_month_start
+    target_df.loc[:, 'is_month_end'] = source_df.loc[:, feature_name].dt.is_month_end
+    target_df.loc[:, 'is_quarter_start']= source_df.loc[:, feature_name].dt.is_quarter_start
+    target_df.loc[:, 'is_quarter_end'] = source_df.loc[:, feature_name].dt.is_quarter_end
+    target_df.loc[:, 'is_year_start'] = source_df.loc[:, feature_name].dt.is_year_start
+    target_df.loc[:, 'is_year_end'] = source_df.loc[:, feature_name].dt.is_year_end
+    
+    target_df.loc[:, 'hour'] = source_df.loc[:, feature_name].dt.hour.astype('uint32')
+    target_df.loc[:, 'minute'] = source_df.loc[:, feature_name].dt.minute.astype('uint32')
+    target_df.loc[:, 'second'] = source_df.loc[:, feature_name].dt.second.astype('uint32')
+    # This is of type object
+    #target_df.loc[:, 'month_year'] = source_df.loc[:, feature_name].dt.to_period('M')
+    
+    return target_df
+
+
 def concat_features(source_df, target_df, f1, f2):
+    print(f'Concating features {f1} and {f2}')
     target_df[f'{f1}_{f2}'] =  source_df[f1].astype(str) + '_' + source_df[f2].astype(str)
     return target_df
 
 
 def create_interaction_features(source_df, target_df):
+    print('Creating interaction features...')
     target_df = concat_features(source_df, target_df, 'site_id', 'building_id')
     target_df['site_building_meter_id'] = source_df.site_id.astype(str) + '_' + source_df.building_id.astype(str) + '_' + source_df.meter.astype(str)
     target_df['site_building_meter_id_usage'] = source_df.site_id.astype(str) + '_' + source_df.building_id.astype(str) + '_' + source_df.meter.astype(str) + '_' + source_df.primary_use
@@ -406,6 +489,7 @@ def create_interaction_features(source_df, target_df):
 
 
 def create_age(source_df, target_df, f):
+    print('Creating age feature')
     target_df['building_age'] = 2019 - source_df[f]
     return target_df
 
@@ -439,7 +523,7 @@ def get_data_splits_by_month(dataframe, train_months, validation_months):
     return training, validation
 
 
-def train_model(training, validation,predictors, taget,  params, test_X=None):
+def train_model(training, validation,predictors, target,  params, test_X=None):
     
     train_X = training[predictors]
     train_Y = np.log1p(training[target])
